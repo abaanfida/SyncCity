@@ -202,6 +202,7 @@ int main(int argc, char const* argv[])
                         if (authenticate_user(username, password)) 
                         {
                             send(new_socket, "$SUCCESS$LOGIN$", strlen("$SUCCESS$LOGIN$"), 0);
+                            printf("Client Logged In\n");
                         } 
                         else 
                         {
@@ -229,6 +230,7 @@ int main(int argc, char const* argv[])
 
                 send(new_socket, "$SUCCESS$", strlen("$SUCCESS$"), 0);
 
+                // Open file for writing
                 FILE* fp = fopen(file_path, "w");
                 if (fp == NULL) 
                 {
@@ -236,14 +238,36 @@ int main(int argc, char const* argv[])
                     continue;
                 }
 
-                while ((valread = read(new_socket, buffer, sizeof(buffer))) > 0) 
+                // Read file size from the client
+                long file_size = 0;
+                valread = read(new_socket, &file_size, sizeof(file_size));
+                if (valread <= 0) 
+                {
+                    perror("Failed to read file size");
+                    fclose(fp);
+                    continue;
+                }
+                printf("Receiving file of size: %ld bytes\n", file_size);
+
+                // Read the file contents based on the file size
+                long bytes_received = 0;
+                while (bytes_received < file_size && (valread = read(new_socket, buffer, sizeof(buffer))) > 0) 
                 {
                     fwrite(buffer, sizeof(char), valread, fp);
+                    bytes_received += valread;
                 }
 
                 fclose(fp);
-                printf("File %s uploaded successfully.\n", file_path);
+                if (bytes_received == file_size) 
+                {
+                    printf("File %s uploaded successfully.\n", file_path);
+                }
+                else 
+                {
+                    printf("File upload incomplete. Expected: %ld bytes, Received: %ld bytes\n", file_size, bytes_received);
+                }
             }
+
             else if (strncmp(command, "$VIEW$", 6) == 0) 
             {
                 //to be added

@@ -99,6 +99,16 @@ int main(int argc, char const* argv[])
                         continue;
                     }
 
+                    // Get the file size
+                    fseek(fp, 0, SEEK_END);
+                    long file_size = ftell(fp);
+                    fseek(fp, 0, SEEK_SET);
+
+                    // Send the file size
+                    send(client_fd, &file_size, sizeof(file_size), 0);
+                    printf("Sending file size: %ld bytes\n", file_size);
+
+                    // Send the file contents
                     while ((valread = fread(buffer, sizeof(char), sizeof(buffer), fp)) > 0) 
                     {
                         send(client_fd, buffer, valread, 0);
