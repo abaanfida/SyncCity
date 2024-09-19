@@ -129,7 +129,6 @@ int main(int argc, char const *argv[])
 
                     printf("Requesting to download file: %s\n", file_path);
 
-
                     if (strncmp(buffer, "$SUCCESS$FILE_FOUND$", 19) == 0)
                     {
                         // Receive the file size
@@ -185,6 +184,7 @@ int main(int argc, char const *argv[])
 
                 else if (strncmp(command, "$VIEW$", 6) == 0)
                 {
+                    //already handled in the response statement outside ifs
                 }
                 else if (strncmp(command, "$LOGOUT$", 8) == 0)
                 {

@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <dirent.h>
+#include <time.h>
 
 #define PORT 9090
 #define BUFFER_SIZE 1024
@@ -89,6 +91,61 @@ int authenticate_user(const char *username, const char *password)
 
     fclose(file);
     return 0; // Authentication failed
+}
+
+void format_file_info(const char *filename, struct stat *file_stat, char *output)
+{
+    char time_str[50];
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&file_stat->st_mtime));
+    snprintf(output, BUFFER_SIZE, "%s | %s | %ld bytes", filename, time_str, file_stat->st_size);
+}
+
+void handle_view_command(int socket, const char *username)
+{
+    char user_folder[BUFFER_SIZE];
+    snprintf(user_folder, sizeof(user_folder), "%s_files", username);
+
+    DIR *dir = opendir(user_folder);
+    if (dir == NULL)
+    {
+        send(socket, "$FAILURE$NO_CLIENT_DATA$", strlen("$FAILURE$NO_CLIENT_DATA$"), 0);
+        return;
+    }
+
+    struct dirent *entry;
+    struct stat file_stat;
+    char file_info[BUFFER_SIZE];
+    char response[BUFFER_SIZE * 10] = ""; // Buffer for all files info
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        // Skip the "." and ".." entries
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        // Get the full path for the file
+        char full_path[BUFFER_SIZE];
+        snprintf(full_path, sizeof(full_path), "%s/%s", user_folder, entry->d_name);
+
+        // Get file statistics
+        if (stat(full_path, &file_stat) == 0)
+        {
+            format_file_info(entry->d_name, &file_stat, file_info);
+            strncat(response, file_info, sizeof(response) - strlen(response) - 1);
+            strncat(response, "\n", sizeof(response) - strlen(response) - 1);
+        }
+    }
+
+    closedir(dir);
+
+    if (strlen(response) == 0)
+    {
+        send(socket, "$FAILURE$NO_CLIENT_DATA$", strlen("$FAILURE$NO_CLIENT_DATA$"), 0);
+    }
+    else
+    {
+        send(socket, response, strlen(response), 0);
+    }
 }
 
 int main(int argc, char const *argv[])
@@ -270,7 +327,7 @@ int main(int argc, char const *argv[])
 
             else if (strncmp(command, "$VIEW$", 6) == 0)
             {
-                // to be added
+                handle_view_command(new_socket, username);
             }
             else if (strncmp(command, "$DOWNLOAD$", 10) == 0)
             {
