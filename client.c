@@ -108,6 +108,10 @@ int main(int argc, char const *argv[])
                     send(client_fd, &file_size, sizeof(file_size), 0);
                     printf("Sending file size: %ld bytes\n", file_size);
 
+                    valread = read(client_fd, buffer, sizeof(buffer) - 1);
+                    buffer[valread] = '\0';
+                    printf("Server response: %s\n", buffer);
+
                     // Send the file contents
                     while ((valread = fread(buffer, sizeof(char), sizeof(buffer), fp)) > 0)
                     {

@@ -1,3 +1,4 @@
+
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@
 
 #define PORT 9090
 #define BUFFER_SIZE 1024
+#define MAX_STORAGE 50
 
 void extract_filename(const char *path, char *filename)
 {
@@ -146,6 +148,33 @@ void handle_view_command(int socket, const char *username)
     {
         send(socket, response, strlen(response), 0);
     }
+}
+
+long calculate_directory_size(const char *dir_path)
+{
+    long total_size = 0;
+    struct dirent *entry;
+    struct stat file_stat;
+    DIR *dir = opendir(dir_path);
+
+    if (dir == NULL)
+    {
+        return -1;
+    }
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        char full_path[BUFFER_SIZE];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+
+        if (stat(full_path, &file_stat) == 0 && S_ISREG(file_stat.st_mode))
+        {
+            total_size += file_stat.st_size;
+        }
+    }
+
+    closedir(dir);
+    return total_size;
 }
 
 int main(int argc, char const *argv[])
@@ -285,7 +314,8 @@ int main(int argc, char const *argv[])
                 snprintf(file_path, sizeof(file_path), "%s/%s", user_folder, filename);
                 printf("Extracted file name: %s\n", filename);
 
-                send(new_socket, "$SUCCESS$", strlen("$SUCCESS$"), 0);
+                send(new_socket, "$COMMAND_RECIEVED$", strlen("$COMMAND_RECIEVED$"), 0);
+                
 
                 // Open file for writing
                 FILE *fp = fopen(file_path, "w");
@@ -306,6 +336,21 @@ int main(int argc, char const *argv[])
                 }
                 printf("Receiving file of size: %ld bytes\n", file_size);
 
+                long dir_size = calculate_directory_size(user_folder);
+                if (dir_size < 0)
+                {
+                    perror("Failed to calculate directory size");
+                    send(new_socket, "$ERROR$", strlen("$ERROR$"), 0);
+                    continue;
+                }
+                printf("Total size of directory %s: %ld bytes\n", user_folder, dir_size);
+                if(dir_size+file_size>MAX_STORAGE)
+                {
+                    perror("Low User Storage");
+                    send(new_socket, "$LOW_SPACE$", strlen("$LOW_SPACE$"), 0);
+                    continue;
+                }
+                send(new_socket, "$SUCCESS$", strlen("$SUCCESS$"), 0);
                 // Read the file contents based on the file size
                 long bytes_received = 0;
                 while (bytes_received < file_size && (valread = read(new_socket, buffer, sizeof(buffer))) > 0)
