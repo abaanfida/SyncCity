@@ -12,7 +12,7 @@
 
 #define PORT 9090
 #define BUFFER_SIZE 1024
-#define MAX_STORAGE 50
+#define MAX_STORAGE 50 
 
 typedef struct {
     int socket;
@@ -307,7 +307,7 @@ void *handle_client(void *arg) {
                     continue;
                 }
                 printf("Total size of directory %s: %ld bytes\n", user_folder, dir_size);
-                if(dir_size+file_size>MAX_STORAGE)
+                if(dir_size+file_size>MAX_STORAGE*1024)
                 {
                     perror("Low User Storage");
                     send(new_socket, "$LOW_SPACE$", strlen("$LOW_SPACE$"), 0);
@@ -405,7 +405,6 @@ void *handle_client(void *arg) {
             {
                 printf("Client logged out.\n");
                 send(new_socket, "$SUCCESS$LOGOUT$", strlen("$SUCCESS$LOGOUT$"), 0);
-                break;
             }
             else if (strncmp(command, "$CLOSE$", 7) == 0)
             {
