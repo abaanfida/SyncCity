@@ -60,17 +60,186 @@ char *run_length_decode(const char *data, long *decoded_size)
     return decoded;
 }
 
+void handle_upload(int client_fd, char *command)
+{
+    char file_path[BUFFER_SIZE] = {0};
+    char buffer[BUFFER_SIZE] = {0};
+    long valread;
+
+    char *file_path_start = command + 8;
+    char *file_path_end = strrchr(file_path_start, '$');
+    if (file_path_end != NULL)
+    {
+        *file_path_end = '\0';
+    }
+    snprintf(file_path, sizeof(file_path), "%s", file_path_start);
+
+    FILE *fp = fopen(file_path, "rb");
+    if (fp == NULL)
+    {
+        perror("Failed to open file");
+        return;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    char *file_data = malloc(file_size + 1);
+    if (file_data == NULL)
+    {
+        perror("Memory allocation failed");
+        fclose(fp);
+        return;
+    }
+
+    fread(file_data, 1, file_size, fp);
+    fclose(fp);
+
+    file_data[file_size] = '\0'; 
+
+    long encoded_size;
+    char *encoded_data = run_length_encode(file_data, &encoded_size);
+    if (!encoded_data)
+    {
+        free(file_data);
+        return;
+    }
+
+    free(file_data);
+
+    send(client_fd, &encoded_size, sizeof(encoded_size), 0);
+    printf("Sending encoded file size: %ld bytes\n", encoded_size);
+
+    valread = read(client_fd, buffer, sizeof(buffer) - 1);
+    buffer[valread] = '\0';
+    printf("Server response: %s\n", buffer);
+
+    send(client_fd, encoded_data, encoded_size, 0);
+
+    free(encoded_data);
+    printf("File %s uploaded successfully (encoded).\n", file_path);
+}
+
+void handle_download(int client_fd, char *command)
+{
+    char file_path[BUFFER_SIZE] = {0};
+    char buffer[BUFFER_SIZE] = {0};
+    long valread;
+
+    char *file_path_start = command + 10;
+    char *file_path_end = strrchr(file_path_start, '$');
+    if (file_path_end != NULL)
+    {
+        *file_path_end = '\0';
+    }
+    strncpy(file_path, file_path_start, sizeof(file_path) - 1);
+
+    printf("Requesting to download file: %s\n", file_path);
+
+    valread = read(client_fd, buffer, sizeof(buffer) - 1);
+    buffer[valread] = '\0';
+
+    if (strncmp(buffer, "$SUCCESS$FILE_FOUND$", 19) == 0)
+    {
+        long encoded_size = 0;
+        valread = read(client_fd, &encoded_size, sizeof(encoded_size));
+        if (valread <= 0)
+        {
+            printf("Failed to receive encoded file size.\n");
+            return;
+        }
+        printf("Receiving encoded file of size: %ld bytes\n", encoded_size);
+
+        char *encoded_data = malloc(encoded_size + 1);
+        if (encoded_data == NULL)
+        {
+            perror("Memory allocation failed");
+            return;
+        }
+
+        long bytes_received = 0;
+        while (bytes_received < encoded_size)
+        {
+            valread = read(client_fd, encoded_data + bytes_received, encoded_size - bytes_received);
+            if (valread <= 0)
+            {
+                break;
+            }
+            bytes_received += valread;
+        }
+        encoded_data[bytes_received] = '\0';
+
+        long decoded_size;
+        char *decoded_data = run_length_decode(encoded_data, &decoded_size);
+        free(encoded_data);
+
+        if (decoded_data == NULL)
+        {
+            return;
+        }
+
+        FILE *fp = fopen(file_path, "wb");
+        if (fp == NULL)
+        {
+            perror("Failed to open file for writing");
+            free(decoded_data);
+            return;
+        }
+
+        fwrite(decoded_data, 1, decoded_size, fp);
+        fclose(fp);
+        free(decoded_data);
+
+        if (bytes_received == encoded_size)
+        {
+            printf("File downloaded and decoded successfully: %s\n", file_path);
+        }
+        else
+        {
+            printf("File download incomplete. Expected: %ld bytes, Received: %ld bytes\n", encoded_size, bytes_received);
+        }
+    }
+    else if (strncmp(buffer, "$FAILURE$FILE_NOT_FOUND$", 24) == 0)
+    {
+        printf("The requested file was not found on the server.\n");
+    }
+    else
+    {
+        printf("An error occurred: %s\n", buffer);
+    }
+}
+
+void handle_view(int client_fd)
+{
+    char buffer[BUFFER_SIZE] = {0};
+    long valread = read(client_fd, buffer, sizeof(buffer) - 1);
+    buffer[valread] = '\0';
+    printf("Server response: %s\n", buffer);
+}
+
+void handle_logout(int client_fd)
+{
+    char buffer[BUFFER_SIZE] = {0};
+    long valread = read(client_fd, buffer, sizeof(buffer) - 1);
+    buffer[valread] = '\0';
+    printf("Server response: %s\n", buffer);
+    printf("Logging out.\n");
+}
+
+void handle_close(int client_fd)
+{
+    close(client_fd);
+    printf("Closing connection.\n");
+}
+
 int main(int argc, char const *argv[])
 {
     int client_fd, valread;
     struct sockaddr_in serv_addr;
     char buffer[BUFFER_SIZE] = {0};
     char command[BUFFER_SIZE] = {0};
-    char file_path[BUFFER_SIZE] = {0};
-    char username[BUFFER_SIZE] = {0};
-    char password[BUFFER_SIZE] = {0};
 
-    // Create socket
     if ((client_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
         perror("Socket creation error");
@@ -80,7 +249,6 @@ int main(int argc, char const *argv[])
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
 
-    // Convert IPv4 and IPv6 addresses from text to binary form
     if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0)
     {
         perror("Invalid address or Address not supported");
@@ -88,7 +256,6 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    // Connect to the server
     if (connect(client_fd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
     {
         perror("Connection failed");
@@ -97,7 +264,7 @@ int main(int argc, char const *argv[])
     }
 
     printf("Connected to the server.\n");
-
+     
     while (1)
     {
         printf("Enter command ($REGISTER$<username>$<password>$ or $LOGIN$<username>$<password>$): ");
@@ -119,183 +286,48 @@ int main(int argc, char const *argv[])
                 printf("Enter command ($UPLOAD$<file_path>$, $VIEW$, $DOWNLOAD$<file_name>$, $LOGOUT$ or $CLOSE$): ");
                 scanf("%1023s", command);
 
-                if (strncmp(command, "$CLOSE$", 7) == 0)
-                {
-                    send(client_fd, "$CLOSE$", strlen("$CLOSE$"), 0);
-                    close(client_fd);
-                    printf("Closing connection.\n");
-                    return 0;
-                }
-
                 send(client_fd, command, strlen(command), 0);
                 printf("Command sent: %s\n", command);
 
-                valread = read(client_fd, buffer, sizeof(buffer) - 1);
-                buffer[valread] = '\0';
-                printf("Server response: %s\n", buffer);
 
-                if (strncmp(command, "$UPLOAD$", 8) == 0)
+                if (strncmp(command, "$CLOSE$", 7) == 0)
                 {
-                    char *file_path_start = command + 8;
-                    char *file_path_end = strrchr(file_path_start, '$');
-                    if (file_path_end != NULL)
-                    {
-                        *file_path_end = '\0';
-                    }
-                    snprintf(file_path, sizeof(file_path), "%s", file_path_start);
-
-                    FILE *fp = fopen(file_path, "rb");
-                    if (fp == NULL)
-                    {
-                        perror("Failed to open file");
-                        continue;
-                    }
-
-                    // Read the entire file into a buffer
-                    fseek(fp, 0, SEEK_END);
-                    long file_size = ftell(fp);
-                    fseek(fp, 0, SEEK_SET);
-
-                    char *file_data = malloc(file_size + 1);
-                    if (file_data == NULL)
-                    {
-                        perror("Memory allocation failed");
-                        fclose(fp);
-                        continue;
-                    }
-
-                    fread(file_data, 1, file_size, fp);
-                    fclose(fp);
-
-                    file_data[file_size] = '\0'; // Null-terminate for encoding
-
-                    // Encode the file data
-                    long encoded_size;
-                    char *encoded_data = run_length_encode(file_data, &encoded_size);
-                    if (!encoded_data)
-                    {
-                        free(file_data);
-                        continue;
-                    }
-
-                    free(file_data);
-
-                    // Send the encoded file size
-                    send(client_fd, &encoded_size, sizeof(encoded_size), 0);
-                    printf("Sending encoded file size: %ld bytes\n", encoded_size);
-
-                    valread = read(client_fd, buffer, sizeof(buffer) - 1);
-                    buffer[valread] = '\0';
-                    printf("Server response: %s\n", buffer);
-
-                    // Send the encoded file contents
-                    send(client_fd, encoded_data, encoded_size, 0);
-
-                    free(encoded_data);
-                    printf("File %s uploaded successfully (encoded).\n", file_path);
+                    handle_close(client_fd);
+                    return 0;
                 }
-
+                else if (strncmp(command, "$UPLOAD$", 8) == 0)
+                {
+                    handle_upload(client_fd, command);
+                }
                 else if (strncmp(command, "$DOWNLOAD$", 10) == 0)
                 {
-                    char *file_path_start = command + 10;
-                    char *file_path_end = strrchr(file_path_start, '$');
-                    if (file_path_end != NULL)
-                    {
-                        *file_path_end = '\0';
-                    }
-                    strncpy(file_path, file_path_start, sizeof(file_path) - 1);
-
-                    printf("Requesting to download file: %s\n", file_path);
-
-                    if (strncmp(buffer, "$SUCCESS$FILE_FOUND$", 19) == 0)
-                    {
-                        long encoded_size = 0;
-                        valread = read(client_fd, &encoded_size, sizeof(encoded_size));
-                        if (valread <= 0)
-                        {
-                            printf("Failed to receive encoded file size.\n");
-                            return;
-                        }
-                        printf("Receiving encoded file of size: %ld bytes\n", encoded_size);
-
-                        char *encoded_data = malloc(encoded_size + 1);
-                        if (encoded_data == NULL)
-                        {
-                            perror("Memory allocation failed");
-                            return;
-                        }
-
-                        long bytes_received = 0;
-                        while (bytes_received < encoded_size)
-                        {
-                            valread = read(client_fd, encoded_data + bytes_received, encoded_size - bytes_received);
-                            if (valread <= 0)
-                            {
-                                break;
-                            }
-                            bytes_received += valread;
-                        }
-                        encoded_data[bytes_received] = '\0';
-
-                        long decoded_size;
-                        char *decoded_data = run_length_decode(encoded_data, &decoded_size);
-                        free(encoded_data);
-
-                        if (decoded_data == NULL)
-                        {
-                            return;
-                        }
-
-                        FILE *fp = fopen(file_path, "wb");
-                        if (fp == NULL)
-                        {
-                            perror("Failed to open file for writing");
-                            free(decoded_data);
-                            return;
-                        }
-
-                        fwrite(decoded_data, 1, decoded_size, fp);
-                        fclose(fp);
-                        free(decoded_data);
-
-                        if (bytes_received == encoded_size)
-                        {
-                            printf("File downloaded and decoded successfully: %s\n", file_path);
-                        }
-                        else
-                        {
-                            printf("File download incomplete. Expected: %ld bytes, Received: %ld bytes\n", encoded_size, bytes_received);
-                        }
-                    }
-                    else if (strncmp(buffer, "$FAILURE$FILE_NOT_FOUND$", 24) == 0)
-                    {
-                        printf("The requested file was not found on the server.\n");
-                    }
-                    else
-                    {
-                        printf("An error occurred: %s\n", buffer);
-                    }
+                    handle_download(client_fd, command);
                 }
-
                 else if (strncmp(command, "$VIEW$", 6) == 0)
                 {
-                    // already handled in the response statement outside ifs
+                    handle_view(client_fd);
                 }
                 else if (strncmp(command, "$LOGOUT$", 8) == 0)
                 {
-                    printf("Logging out.\n");
+                    handle_logout(client_fd);
                     break;
                 }
             }
         }
+        //Error Handling.
         else if (strncmp(buffer, "$FAILURE$LOGIN$", 15) == 0)
         {
             printf("Login failed.\n");
         }
-        
+        else if (strncmp(buffer, "$SUCCESS$REGISTER$", 18) == 0)
+        {
+            printf("Registration successful.\n");
+        }
+        else if (strncmp(buffer, "$FAILURE$REGISTER$", 18) == 0)
+        {
+            printf("Registration failed. Username already exists.\n");
+        }
     }
-
-    close(client_fd);
 
     return 0;
 }
