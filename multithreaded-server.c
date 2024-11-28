@@ -8,15 +8,87 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <time.h>
-#include <pthread.h> // Include for multithreading
+#include <pthread.h> 
+#include <semaphore.h>
 
 #define PORT 9090
 #define BUFFER_SIZE 1024
 #define MAX_STORAGE 50 
+#define QUEUE_SIZE 100
+#define MAX_USERS 50
 
-typedef struct {
+typedef struct 
+{
+    int socket;
+    char command[BUFFER_SIZE];
+} task_t;
+
+typedef struct 
+{
+    task_t tasks[QUEUE_SIZE];
+    int front;
+    int rear;
+    int count;
+    pthread_mutex_t lock;
+    sem_t full; 
+    sem_t empty; 
+} queue_t;
+
+
+void queue_init(queue_t *queue) 
+{
+    queue->front = 0;
+    queue->rear = 0;
+    queue->count = 0;
+    pthread_mutex_init(&queue->lock, NULL);
+    sem_init(&queue->full, 0, 0);         
+    sem_init(&queue->empty, 0, QUEUE_SIZE);
+}
+
+
+void enqueue(queue_t *queue, task_t task) 
+{
+    sem_wait(&queue->empty);          
+    pthread_mutex_lock(&queue->lock); 
+
+    queue->tasks[queue->rear] = task;
+    queue->rear = (queue->rear + 1) % QUEUE_SIZE;
+    queue->count++;
+
+    pthread_mutex_unlock(&queue->lock);
+    sem_post(&queue->full);           
+}
+
+
+task_t dequeue(queue_t *queue) 
+{
+    sem_wait(&queue->full);           
+    pthread_mutex_lock(&queue->lock);  
+    task_t task = queue->tasks[queue->front];
+    queue->front = (queue->front + 1) % QUEUE_SIZE;
+    queue->count--;
+
+    pthread_mutex_unlock(&queue->lock);
+    sem_post(&queue->empty);           
+    return task;
+}
+
+queue_t task_queue;
+
+void initialize_server() 
+{
+    queue_init(&task_queue);
+}
+
+
+
+
+
+typedef struct 
+{
     int socket;
     struct sockaddr_in address;
+    char username[BUFFER_SIZE];
 } client_data_t;
 
 void extract_filename(const char *path, char *filename)
@@ -38,7 +110,7 @@ int username_exists(const char *username)
     if (file == NULL)
     {
         perror("Error opening users.txt for reading");
-        return 0; // Assume no users exist if the file can't be opened
+        return 0; 
     }
 
     char file_username[BUFFER_SIZE];
@@ -48,12 +120,12 @@ int username_exists(const char *username)
         if (strcmp(username, file_username) == 0)
         {
             fclose(file);
-            return 1; // Username exists
+            return 1;
         }
     }
 
     fclose(file);
-    return 0; // Username does not exist
+    return 0;
 }
 
 void register_user(const char *username, const char *password)
@@ -64,7 +136,6 @@ void register_user(const char *username, const char *password)
         fprintf(file, "%s %s\n", username, password);
         fclose(file);
 
-        // Create user folder
         char user_folder[BUFFER_SIZE];
         snprintf(user_folder, sizeof(user_folder), "%s_files", username);
         mkdir(user_folder, 0700);
@@ -92,12 +163,12 @@ int authenticate_user(const char *username, const char *password)
         if (strcmp(username, file_username) == 0 && strcmp(password, file_password) == 0)
         {
             fclose(file);
-            return 1; // Authentication successful
+            return 1; 
         }
     }
 
     fclose(file);
-    return 0; // Authentication failed
+    return 0; 
 }
 
 void format_file_info(const char *filename, struct stat *file_stat, char *output)
@@ -217,8 +288,6 @@ void handle_upload_command(int socket, char *command, const char *username)
     snprintf(file_path, sizeof(file_path), "%s/%s", user_folder, filename);
     printf("Extracted file name: %s\n", filename);
 
-    send(socket, "$COMMAND_RECIEVED$", strlen("$COMMAND_RECIEVED$"), 0);
-
     FILE *fp = fopen(file_path, "w");
     if (fp == NULL) {
         perror("Failed to open file");
@@ -226,6 +295,11 @@ void handle_upload_command(int socket, char *command, const char *username)
     }
     long file_size = 0;
     int valread = read(socket, &file_size, sizeof(file_size));
+    if(file_size==-1)
+    {
+        printf("Client Could Not Open File!\n");
+        return;
+    }
     if (valread <= 0) {
         perror("Failed to read file size");
         fclose(fp);
@@ -249,8 +323,7 @@ void handle_upload_command(int socket, char *command, const char *username)
         fclose(fp);
         return;
     }
-    send(socket, "$SUCCESS$", strlen("$SUCCESS$"), 0);
-
+    
     long bytes_received = 0;
     while (bytes_received < file_size && (valread = read(socket, buffer, sizeof(buffer))) > 0) 
     {
@@ -262,6 +335,8 @@ void handle_upload_command(int socket, char *command, const char *username)
     if (bytes_received == file_size) 
     {
         printf("File %s uploaded successfully.\n", file_path);
+        send(socket, "$SUCCESS$", strlen("$SUCCESS$"), 0);
+
     }
     else 
     {
@@ -284,6 +359,7 @@ void handle_download_command(int socket, char *command, const char *username)
     }
     strncpy(file_path, file_path_start, sizeof(file_path) - 1);
 
+    //extract filename
     extract_filename(file_path, filename);
 
     char user_folder[BUFFER_SIZE];
@@ -393,66 +469,88 @@ void handle_close_command(int socket)
     printf("Closing connection as requested by the client.\n");
 }
 
+
+client_data_t *client_data_list[MAX_USERS];
+client_data_t *get_client_data_by_socket(int socket) 
+{
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (client_data_list[i] != NULL && client_data_list[i]->socket == socket) 
+        {
+            return client_data_list[i];
+        }
+    }
+    return NULL; // Not found
+}
+
+
+
 void *handle_client(void *arg) {
     client_data_t *client_data = (client_data_t *)arg;
     int new_socket = client_data->socket;
-    struct sockaddr_in address = client_data->address;
-    int valread;
     char command[BUFFER_SIZE] = {0};
-    char username[BUFFER_SIZE] = {0};
-    char password[BUFFER_SIZE] = {0};
+
     printf("Handling new client in thread.\n");
 
-    while (1) { // Client handling loop
-        valread = read(new_socket, command, sizeof(command) - 1);
-        if (valread <= 0) {
+    while (1) 
+    {
+        int valread = read(new_socket, command, sizeof(command) - 1);
+        if (valread <= 0) 
+        {
             printf("Client disconnected or read error.\n");
-            break; // Exit the client handling loop
+            break;
         }
 
         command[valread] = '\0';
 
-        if (strncmp(command, "$REGISTER$", 10) == 0) 
-        {
-            handle_register_command(new_socket, command);
-        } 
-        else if (strncmp(command, "$LOGIN$", 7) == 0) 
-        {
-            handle_login_command(new_socket, command,username);
-        }
-        else if (strncmp(command, "$UPLOAD$", 8) == 0) 
-        {
-            handle_upload_command(new_socket, command, username);
-        }
-        else if (strncmp(command, "$VIEW$", 6) == 0) 
-        {
-            handle_view_command(new_socket, username);
-        }
-        else if (strncmp(command, "$DOWNLOAD$", 10) == 0) 
-        {
-            handle_download_command(new_socket, command, username);
-        }
-        else if (strncmp(command, "$LOGOUT$", 8) == 0)
-        {
-            handle_logout_command(new_socket);
-            break;
-        }
-        else if (strncmp(command, "$CLOSE$", 7) == 0)
-        {
-            handle_close_command(new_socket);
-            break;
-        }
-        else
-        {
-            send(new_socket, "$ERROR$INVALID_COMMAND$", strlen("$ERROR$INVALID_COMMAND$"), 0);
-        }
+        task_t task;
+        task.socket = new_socket;
+        strncpy(task.command, command, sizeof(task.command) - 1);
+
+        enqueue(&task_queue, task); // Add task to the queue
     }
 
     close(new_socket);
-    free(client_data); // Free the allocated memory for client_data
+    free(client_data); // Free allocated memory
     printf("Client connection closed.\n");
     pthread_exit(NULL);
 }
+
+void *file_handler(void *arg) 
+{
+    while (1) {
+        task_t task = dequeue(&task_queue); 
+
+        client_data_t *client_data = get_client_data_by_socket(task.socket);
+
+
+        if (client_data == NULL) 
+        {
+            continue;  
+        }
+
+        if (strncmp(task.command, "$REGISTER$", 10) == 0) {
+            handle_register_command(task.socket, task.command);
+        } else if (strncmp(task.command, "$LOGIN$", 7) == 0) {
+            handle_login_command(task.socket, task.command, client_data->username);
+        } else if (strncmp(task.command, "$UPLOAD$", 8) == 0) {
+            handle_upload_command(task.socket, task.command, client_data->username);
+        } else if (strncmp(task.command, "$VIEW$", 6) == 0) {
+            handle_view_command(task.socket, client_data->username);
+        } else if (strncmp(task.command, "$DOWNLOAD$", 10) == 0) {
+            handle_download_command(task.socket, task.command, client_data->username);
+        } else if (strncmp(task.command, "$LOGOUT$", 8) == 0) {
+            handle_logout_command(task.socket);
+        } else if (strncmp(task.command, "$CLOSE$", 7) == 0) {
+            printf("Client requested connection close.\n");
+            close(task.socket);
+        } else {
+            send(task.socket, "$ERROR$INVALID_COMMAND$", strlen("$ERROR$INVALID_COMMAND$"), 0);
+        }
+    }
+    pthread_exit(NULL);
+}
+
+
 
 
 int main(int argc, char const *argv[])
@@ -491,35 +589,24 @@ int main(int argc, char const *argv[])
 
     printf("Server is listening for connections...\n");
 
-    while (1) // 
-    {
+    initialize_server();
+
+    pthread_t file_handler_thread;
+    pthread_create(&file_handler_thread, NULL, file_handler, NULL);
+
+    while (1) {
+        // Accept new clients and spawn threads
         client_data_t *client_data = malloc(sizeof(client_data_t));
-        if (!client_data) {
-            perror("Failed to allocate memory for client data");
-            continue;
-        }
-
         client_data->socket = accept(server_fd, (struct sockaddr *)&client_data->address, &addrlen);
-        if (client_data->socket < 0) {
-            perror("accept");
-            free(client_data);
-            continue; 
-        }
+        client_data_list[client_data->socket] = client_data;  // Store the client data
 
-        printf("Connection accepted. Spawning thread to handle the client...\n");
 
-        pthread_t thread_id;
-        if (pthread_create(&thread_id, NULL, handle_client, (void *)client_data) != 0) {
-            perror("Failed to create thread");
-            close(client_data->socket);
-            free(client_data);
-        }
-        else
-        {
-            pthread_detach(thread_id);
-        }
+        pthread_t client_thread;
+        pthread_create(&client_thread, NULL, handle_client, client_data);
+        pthread_detach(client_thread); // Automatically clean up after client thread exits
     }
 
+    pthread_join(file_handler_thread, NULL);
     close(server_fd);
     return 0;
 }
